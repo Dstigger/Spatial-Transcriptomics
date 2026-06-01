@@ -1,0 +1,115 @@
+# ── 1. Identify non-gene columns ──────────────────────────────────────────────
+NON_GENE_COLS = {"fov", "cell_ID"}   # exactly what's in the counts file
+
+# Read header without setting an index so we see all columns as-is
+all_cols  = pd.read_csv(counts_file, nrows=0).columns.tolist()
+gene_cols = [c for c in all_cols if c not in NON_GENE_COLS]
+
+print(f"All columns (first 8): {all_cols[:8]}")
+print(f"Gene columns: {len(gene_cols)}, Non-gene: {[c for c in all_cols if c in NON_GENE_COLS]}")
+
+# ── 2. Load slide_ID lookup from metadata (counts file has no slide_ID) ────────
+# We'll map (fov, cell_ID) → slide_ID using the metadata file
+# Only load the columns we need to keep RAM low
+print("Loading slide_ID lookup from metadata...")
+meta_ids = pd.read_csv(
+    meta_file,
+    usecols=["fov", "cell_ID", "slide_ID"],
+    dtype={"fov": str, "cell_ID": str, "slide_ID": str}
+)
+# Build a lookup dict keyed by (fov, cell_ID)
+slide_lookup = {(row.fov, row.cell_ID): row.slide_ID for row in meta_ids.itertuples()}
+print(f"Loaded {len(slide_lookup):,} cell→slide mappings")
+
+# ── 3. Stream counts ───────────────────────────────────────────────────────────
+chunks    = []
+obs_names = []
+
+for i, chunk in enumerate(pd.read_csv(counts_file, chunksize=5_000, dtype={"fov": str, "cell_ID": str})):
+    # fov and cell_ID are regular columns here (no index)
+    fov_vals  = chunk["fov"].astype(str)
+    cell_vals = chunk["cell_ID"].astype(str)
+
+    # Look up slide_ID for each cell; fall back to "1" if missing
+    slide_vals = [slide_lookup.get((f, c), "1") for f, c in zip(fov_vals, cell_vals)]
+
+    names = [f"c_{s}_{f}_{c}" for s, f, c in zip(slide_vals, fov_vals, cell_vals)]
+    obs_names.extend(names)
+
+    # Keep only gene expression columns
+    gene_chunk = chunk[gene_cols]
+    chunks.append(sp.csr_matrix(gene_chunk.values, dtype="float32"))
+
+    if i % 10 == 0:
+        print(f"  Processed {len(obs_names):,} cells... sample: {names[0]}")
+
+print("Stacking sparse matrix...")
+X = sp.vstack(chunks)
+
+n_dupes = len(obs_names) - len(set(obs_names))
+print(f"Duplicate obs_names: {n_dupes}")  # must be 0
+
+# ── 4. Load full metadata, reindex to match obs_names ─────────────────────────
+print("Loading full metadata...")
+meta = pd.read_csv(
+    meta_file,
+    dtype={"fov": str, "cell_ID": str, "slide_ID": str}
+)
+# Build the same name for each metadata row so we can align
+meta["_obs_name"] = "c_" + meta["slide_ID"] + "_" + meta["fov"] + "_" + meta["cell_ID"]
+meta = meta.set_index("_obs_name")
+meta = meta.loc[obs_names]   # reorder to match X row order
+
+# ── 5. Build AnnData ──────────────────────────────────────────────────────────
+print("Building AnnData...")
+adata = ad.AnnData(
+    X   = X,
+    obs = meta,
+    var = pd.DataFrame(index=gene_cols),
+)
+adata.obs_names = obs_names
+
+# ── 6. Spatial coordinates (from metadata) ────────────────────────────────────
+if "CenterX_global_px" in adata.obs.columns:
+    coords_fov = adata.obs[["CenterX_global_px", "CenterY_global_px"]].values.astype(float)
+    coords_fov[:, 1] = np.max(coords_fov[:, 1]) - coords_fov[:, 1]
+    adata.obsm["spatial_fov"] = coords_fov
+    print("  ✓ spatial_fov (global coords, y-flipped)")
+
+if "CenterX_local_px" in adata.obs.columns:
+    coords_local = adata.obs[["CenterX_local_px", "CenterY_local_px"]].values.astype(float)
+    coords_local[:, 1] = np.max(coords_local[:, 1]) - coords_local[:, 1]
+    adata.obsm["spatial"] = coords_local
+    print("  ✓ spatial (local coords, y-flipped)")
+
+# FOV positions table stored for downstream use
+fov_df = pd.read_csv(fov_file)
+adata.uns["fov_positions"] = fov_df.to_dict("list")
+print("  ✓ fov_positions stored in uns")
+
+# Set spatial key squidpy expects
+adata.obsm["spatial"] = adata.obsm["spatial_fov"].copy()
+
+# squidpy expects adata.uns["spatial"][library_id] to exist
+library_id = "Pancreas"
+adata.uns["spatial"] = {
+    library_id: {
+        "images": {},           # no image, but key must exist
+        "scalefactors": {
+            "spot_diameter_fullres": 1.0,
+            "tissue_hires_scalef": 1.0,
+        },
+    }
+}
+
+# Tag each cell with the library_id so squidpy knows which library it belongs to
+adata.obs["library_id"] = library_id
+
+print(f"\nDone! {adata}")
+print(f"obs_names preview: {adata.obs_names[:5].tolist()}")
+print(f"obsm keys: {list(adata.obsm.keys())}")
+
+
+
+adata.write_h5ad("my__data.h5ad")
+print("Saved → my__data.h5ad")

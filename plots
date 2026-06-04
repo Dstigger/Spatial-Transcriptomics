@@ -1,0 +1,86 @@
+from scipy.stats import spearmanr
+
+# Example column names
+transcript_col = "total_counts"
+dapi_col = "Mean.DAPI"
+#membrane_col = "Mean.CD298_B2M"
+membrane_col = "distance_to_edge"
+
+# Build dataframe
+plot_df = adata.obs[[transcript_col, dapi_col, membrane_col]].copy()
+
+plot_df = plot_df.replace([np.inf, -np.inf], np.nan).dropna()
+
+plot_df = plot_df[(plot_df["distance_to_edge"] > 30) & (plot_df["distance_to_edge"] < 92)].copy()
+
+# Optional log transform
+plot_df["log_total_counts"] = np.log1p(plot_df[transcript_col])
+
+# ---------------------------------------------------
+# Plot 1: DAPI vs transcript count
+# ---------------------------------------------------
+
+rho_dapi, p_dapi = spearmanr(
+    plot_df[dapi_col],
+    plot_df["log_total_counts"]
+)
+
+plt.figure(figsize=(6,5))
+
+sns.scatterplot(
+    data=plot_df,
+    x=dapi_col,
+    y="log_total_counts",
+    s=8,
+    alpha=0.4
+)
+
+plt.xlabel("Median DAPI Intensity")
+plt.ylabel("log1p(Transcript Count)")
+plt.title("Transcript Count vs Median DAPI")
+
+# Add correlation text
+plt.text(
+    0.05,
+    0.95,
+    f"Spearman r = {rho_dapi:.3f}",
+    transform=plt.gca().transAxes,
+    verticalalignment='top'
+)
+
+plt.tight_layout()
+plt.show()
+
+# ---------------------------------------------------
+# Plot 2: Membrane vs transcript count
+# ---------------------------------------------------
+
+rho_mem, p_mem = spearmanr(
+    plot_df[membrane_col],
+    plot_df["log_total_counts"]
+)
+
+plt.figure(figsize=(6,5))
+
+sns.scatterplot(
+    data=plot_df,
+    x=membrane_col,
+    y="log_total_counts",
+    s=8,
+    alpha=0.4
+)
+
+plt.xlabel("Mean Membrane Intensity")
+plt.ylabel("log1p(Transcript Count)")
+plt.title("Transcript Count vs Mean Membrane")
+
+plt.text(
+    0.05,
+    0.95,
+    f"Spearman r = {rho_mem:.3f}",
+    transform=plt.gca().transAxes,
+    verticalalignment='top'
+)
+
+plt.tight_layout()
+plt.show()
